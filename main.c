@@ -128,39 +128,47 @@ int main(int argc, char* argv[])
 
 void process_function(ProcessArguments* param)
 {
+    printf("Slave %d Started. Interval %d-%d\n",param->id,param->interval_start,param->interval_end);
+    
     // Pointer to shared memory of this process
     int *ptr_shm = param->shm;
 
-    printf("Slave %d Started. Interval %d-%d\n",param->id,param->interval_start,param->interval_end);
+    // Interval length of each thread
+    int interval_steps = (param->interval_end - param->interval_start) / param->num_children;
+
+    // Array of thread ids and thread_function arguments
+    pthread_t ids[param->num_children];
+    ThreadArguments *args[param->num_children];
 
     // Create threads
     for (int i = 0; i < param->num_children; i++)
     {
         // Calculate interval of thread
-        int interval_steps = (param->interval_end - param->interval_start) / param->num_children;
         int subinterval_start = param->interval_start + (interval_steps * i) + i;
         int subinterval_end = param->interval_start + (interval_steps * (i+1)) + i;
 
         // Create Arguments of thread function
-        ThreadArguments *args = malloc(sizeof(ThreadArguments));
-        args->id = i;
-        args->process_id = param->id;
-        args->interval_start = subinterval_start;
-        args->interval_end = subinterval_end;
-        
-        // Thread id and thread function return value
-        pthread_t id;
-        void *primes;
+        args[i] = malloc(sizeof(ThreadArguments));
+        args[i]->id = i;
+        args[i]->process_id = param->id;
+        args[i]->interval_start = subinterval_start;
+        args[i]->interval_end = subinterval_end;
 
         // Create thread and check error
-        if(pthread_create(&id, NULL, thread_function, args)) {
+        if(pthread_create(&ids[i], NULL, thread_function, args[i])) {
             free(args);
             printf("Error happened while creating thread\n");
             return;
         }
+    }
 
-        // Get return value from thread
-        pthread_join(id, &primes);
+    // Wait for threads to finish
+    for (int i = 0; i < param->num_children; i++)
+    {
+        // Thread will allocate memory for this
+        void *primes;
+
+        pthread_join(ids[i], &primes);
 
         // Write returned array to shared memory
         int *ptr_primes = (int*)primes;
@@ -170,9 +178,11 @@ void process_function(ProcessArguments* param)
             ptr_shm++;
         }
 
-        // Free the returned array
+        // Free memory
         free(primes);
+        free(args[i]);
     }
+    
 
     // Add -1 to shared memory indicating end
     *ptr_shm = -1;
