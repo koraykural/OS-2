@@ -1,51 +1,64 @@
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include<sys/wait.h>
-#include <sys/types.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <pthread.h>
 
-void process_function(int interval_start, int interval_end, int *pipe_endings);
+typedef struct {
+    int id;
+    int interval_start;
+    int interval_end;
+    int* shm;
+    int num_children;
+} ProcessArguments;
+
+typedef struct {
+    int process_id;
+    int id;
+    int interval_start;
+    int interval_end;
+} ThreadArguments;
+
+void process_function(ProcessArguments *args);
+void* thread_function(void *args);
 bool isPrime(int number);
 
 int main(int argc, char* argv[])
 {
     // Check argument count
     if(argc != 5) {
-        printf("4 arguments requiered, returning\n");
+        printf("4 Arguments requiered, returning\n");
         return EXIT_FAILURE;
     }
 
     printf("Master: Started.\n");
 
-    // Get arguments
+    // Get Arguments
     char *ptr;
     int interval_start = strtol(argv[1], &ptr, 10);
     int interval_end = strtol(argv[2], &ptr, 10);
     int num_processes = strtol(argv[3], &ptr, 10);
-    //int num_threads = strtol(argv[4], &ptr, 10);
+    int num_threads = strtol(argv[4], &ptr, 10);
 
-    // Create pipe for each child process
-    int **fds = NULL;
-    fds = malloc(sizeof(int) * num_processes);
-    for (int i = 0; i < num_processes; i++)
-    {
-        fds[i] = malloc(sizeof(int) * 2);
-        pipe(fds[i]);
-    }
-
-    // Calculate interval lenght of processes
+    // Calculate interval length of each process
     int interval_steps = (interval_end - interval_start) / num_processes;
 
-    // Store pids of child processes
-    int *child_processes = malloc(sizeof(int) * num_processes);
+    // Create shared memory for each child process
+    int *shmids = malloc(sizeof(int) * num_processes);
+    for (int i = 0; i < num_processes; i++)
+    {
+        key_t key = ftok("main.c",i);
+        int size = sizeof(int) * interval_steps / 2;
+        shmids[i] = shmget(key, size, 0666|IPC_CREAT); 
+    }
     
     // Create child processes
-    int pid = 1;
     for(int i = 0; i < num_processes; i++)
     {
-        pid = fork();
+        int pid = fork();
 
         // Fork error
         if(pid < 0) {
@@ -55,19 +68,34 @@ int main(int argc, char* argv[])
 
         // Child process
         else if(pid == 0) {
+            // Calculate interval of process
             int subinterval_start = interval_start + (interval_steps * i) + i;
             int subinterval_end = interval_start + (interval_steps * (i+1)) + i;
-            printf("Slave %d Started. Interval %d-%d\n",i,subinterval_start,subinterval_end);
-            process_function(subinterval_start, subinterval_end, fds[i]);
-            printf("Slave %d: Done\n",i);
+
+            // Pointer to shared memory of this process
+            int *ptr = (int*) shmat(shmids[i],(void*)0,0);
+
+            // Create Arguments for process function
+            ProcessArguments *args = malloc(sizeof(ProcessArguments));
+            args->interval_start = subinterval_start;
+            args->interval_end = subinterval_end;
+            args->num_children = num_threads;
+            args->shm = ptr;
+            args->id = i;
+
+            process_function(args);
+
+            // Detach from shared memory and free Arguments
+            free(args);
+            shmdt(ptr);
+
+            // Exit child process
             exit(0);
             break;
         }
 
-        // Main process
-        else {
-            child_processes[i] = pid;
-        }
+        // Main process does nothing here
+        else continue;
     }
 
     // Wait for all child processes to finish
@@ -77,42 +105,112 @@ int main(int argc, char* argv[])
     printf("Master: Done. Prime numbers are: ");
     for (int i = 0; i < num_processes; i++)
     {
-        // Close writing end of pipe
-        close(fds[i][1]);
+        // Pointer to shared memory of i'th process
+        int *ptr = (int*) shmat(shmids[i],(void*)0,0);
 
-        // Read until the end
-        int read_value;
-        while (read(fds[i][0], &read_value, sizeof(int)) > 0) {
-            printf("%d, ", read_value);
+        // Print values until the end
+        while (*ptr != -1) {
+            printf("%d, ", *ptr);
+            ptr++;
         }
 
-        // Close reading end of pipe
-        close(fds[i][0]);
+        // Detach and destroy shared memory
+        shmdt(ptr);
+        shmctl(shmids[i],IPC_RMID,NULL); 
     }
     printf("\n");
 
-    // Free the memory and terminate program
-    free(child_processes);
-    for (int i = 0; i < num_processes; i++)
-    {
-        free(fds[i]);
-    }
     return EXIT_SUCCESS;
 }
 
-void process_function(int interval_start, int interval_end, int *pipe_endings)
+
+
+
+void process_function(ProcessArguments* param)
 {
-    // Close the reading end of the pipe
-    close(pipe_endings[0]);
-    for (int i = interval_start; i <= interval_end; i++)
+    // Pointer to shared memory of this process
+    int *ptr_shm = param->shm;
+
+    printf("Slave %d Started. Interval %d-%d\n",param->id,param->interval_start,param->interval_end);
+
+    // Create threads
+    for (int i = 0; i < param->num_children; i++)
+    {
+        // Calculate interval of thread
+        int interval_steps = (param->interval_end - param->interval_start) / param->num_children;
+        int subinterval_start = param->interval_start + (interval_steps * i) + i;
+        int subinterval_end = param->interval_start + (interval_steps * (i+1)) + i;
+
+        // Create Arguments of thread function
+        ThreadArguments *args = malloc(sizeof(ThreadArguments));
+        args->id = i;
+        args->process_id = param->id;
+        args->interval_start = subinterval_start;
+        args->interval_end = subinterval_end;
+        
+        // Thread id and thread function return value
+        pthread_t id;
+        void *primes;
+
+        // Create thread and check error
+        if(pthread_create(&id, NULL, thread_function, args)) {
+            free(args);
+            printf("Error happened while creating thread\n");
+            return;
+        }
+
+        // Get return value from thread
+        pthread_join(id, &primes);
+
+        // Write returned array to shared memory
+        int *ptr_primes = (int*)primes;
+        while(*ptr_primes != -1) {
+            *ptr_shm = *ptr_primes;
+            ptr_primes++;
+            ptr_shm++;
+        }
+
+        // Free the returned array
+        free(primes);
+    }
+
+    // Add -1 to shared memory indicating end
+    *ptr_shm = -1;
+    
+    printf("Slave %d: Done\n",param->id);
+}
+
+
+
+
+void* thread_function(void *param)
+{
+    // From void to struct
+    ThreadArguments *args = (ThreadArguments*) param;
+
+    printf("Thread %d.%d: searching in %d-%d\n", args->process_id, args->id, args->interval_start, args->interval_end);
+
+    // Create int arrray
+    int *return_value = malloc(sizeof(int) * (args->interval_end - args->interval_start));
+
+    // Add prime numbers to array
+    int *ptr = return_value;
+    for (int i = args->interval_start; i < args->interval_end; i++)
     {
         if(isPrime(i)) {
-            write(pipe_endings[1], &i, sizeof(int));
+            *ptr = i;
+            ptr++;
         }
     }
-    close(pipe_endings[1]);
-    return;
+
+    // Add -1 to array indicating end
+    *ptr = -1;
+
+    return (void *) return_value;
 }
+
+
+
 
 bool isPrime(int number)
 {
