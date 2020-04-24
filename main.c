@@ -2,8 +2,7 @@
 * Bekir Koray Kural
 * 150170053
 * Development environment: Ubuntu 18.04
-* Compile and link: gcc -std=c99 -lpthread main.c - main
-* To compile: gcc -std=c99 -D_SVID_SOURCE -D_GNU_SOURCE -lpthread main.c -o main
+* To compile: gcc -std=c99 -lpthread main.c -o main
 * To run: ./main interval_min interval_max np nt
 * Example: ./main 1 200 2 2
 */
